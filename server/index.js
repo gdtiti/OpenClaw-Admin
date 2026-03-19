@@ -2314,22 +2314,33 @@ function broadcastBackupProgress(taskId, progress) {
 
 async function executeOpenClawBackup(outputPath) {
   return new Promise((resolve, reject) => {
-    const args = ['backup', 'create', '--output', outputPath]
-    
     const openclawHome = process.env.OPENCLAW_HOME
-    const spawnOptions = {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: process.platform === 'win32',
-      env: openclawHome 
-        ? { ...process.env, HOME: openclawHome }
-        : process.env
+    
+    let command, args, spawnOptions
+    
+    if (openclawHome && process.platform !== 'win32') {
+      const username = openclawHome.split('/').pop()
+      console.log(`[Backup] Running as user '${username}' with full environment`)
+      
+      command = 'su'
+      args = ['-', username, '-c', `openclaw backup create --output ${outputPath}`]
+      spawnOptions = { stdio: ['ignore', 'pipe', 'pipe'] }
+    } else {
+      command = 'openclaw'
+      args = ['backup', 'create', '--output', outputPath]
+      spawnOptions = {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: process.platform === 'win32',
+        env: openclawHome 
+          ? { ...process.env, HOME: openclawHome }
+          : process.env
+      }
+      if (openclawHome) {
+        console.log(`[Backup] Using OPENCLAW_HOME: ${openclawHome}`)
+      }
     }
     
-    if (openclawHome) {
-      console.log(`[Backup] Using OPENCLAW_HOME: ${openclawHome}`)
-    }
-    
-    const proc = spawn('openclaw', args, spawnOptions)
+    const proc = spawn(command, args, spawnOptions)
 
     let stdout = ''
     let stderr = ''
@@ -2605,12 +2616,21 @@ async function executeBackupTask(taskId, params = {}) {
     broadcastBackupProgress(taskId, { status: 'running', progress: 10, message: task.message, stage: 'openclaw_backup' })
     updateBackupRecord(taskId, { status: 'running', progress: 10, message: task.message, stage: 'openclaw_backup' })
 
-    const openclawBackupPath = join(tempDir, 'openclaw_backup.tar.gz')
+    const openclawBackupPath = join(os.tmpdir(), `openclaw_backup_${taskId}.tar.gz`)
+    const openclawFinalPath = join(tempDir, 'openclaw_backup.tar.gz')
     try {
       await executeOpenClawBackup(openclawBackupPath)
       console.log('[Backup] OpenClaw backup created')
+      
+      if (existsSync(openclawBackupPath)) {
+        copyFileSync(openclawBackupPath, openclawFinalPath)
+        unlinkSync(openclawBackupPath)
+      }
     } catch (err) {
       console.warn('[Backup] OpenClaw backup skipped:', err.message)
+      if (existsSync(openclawBackupPath)) {
+        try { unlinkSync(openclawBackupPath) } catch (e) {}
+      }
     }
 
     task.message = 'Backing up project database...'
@@ -2620,8 +2640,9 @@ async function executeBackupTask(taskId, params = {}) {
 
     const filesToArchive = []
 
-    if (existsSync(openclawBackupPath)) {
-      filesToArchive.push({ path: openclawBackupPath, name: 'openclaw_backup.tar.gz' })
+    if (existsSync(openclawFinalPath)) {
+      filesToArchive.push({ path: openclawFinalPath, name: 'openclaw_backup.tar.gz' })
+      console.log('[Backup] OpenClaw backup added')
     }
 
     if (existsSync(WIZARD_DB_PATH)) {
