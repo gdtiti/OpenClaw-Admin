@@ -9,11 +9,13 @@ const APP_VERSION = JSON.parse(
 ).version || ''
 
 export class OpenClawGateway extends EventEmitter {
-  constructor(url, authToken, authPassword) {
+  constructor(url, authToken, authPassword, logLevel = 'INFO') {
     super()
     this.url = url
     this.authToken = authToken
-    this.authPassword = authPassword // Gateway 密码认证
+    this.authPassword = authPassword
+    this.logLevel = logLevel
+    this.isDebug = logLevel === 'DEBUG'
     this.ws = null
     this.isConnected = false
     this.pendingCalls = new Map()
@@ -25,6 +27,12 @@ export class OpenClawGateway extends EventEmitter {
     this.deviceIdentity = null
   }
 
+  debug(...args) {
+    if (this.isDebug) {
+      console.log('[Gateway]', ...args)
+    }
+  }
+
   async connect() {
     if (this.ws) {
       this.ws.close()
@@ -33,8 +41,8 @@ export class OpenClawGateway extends EventEmitter {
     const authParam = this.authToken || this.authPassword || ''
     const wsUrl = authParam ? `${this.url}?auth=${authParam}` : this.url
     
-    console.log('[Gateway] Connecting to:', this.url)
-    console.log('[Gateway] Auth configured:', {
+    this.debug('Connecting to:', this.url)
+    this.debug('Auth configured:', {
       hasToken: !!this.authToken,
       hasPassword: !!this.authPassword,
       tokenLength: this.authToken?.length || 0,
@@ -45,7 +53,7 @@ export class OpenClawGateway extends EventEmitter {
       this.ws = new WebSocket(wsUrl)
       
       this.ws.on('open', () => {
-        console.log('[Gateway] WebSocket opened, preparing connect frame...')
+        this.debug('WebSocket opened, preparing connect frame...')
         this.connectId = `connect-${Date.now()}`
         this.nonce = null
         this.connectSent = false
@@ -53,19 +61,19 @@ export class OpenClawGateway extends EventEmitter {
         
         setTimeout(() => {
           if (!this.connectSent) {
-            console.log('[Gateway] Sending connect frame (no challenge received)')
+            this.debug('Sending connect frame (no challenge received)')
             this.sendConnect()
           }
         }, 500)
       })
 
       this.ws.on('message', (data) => {
-        console.log('[Gateway] Received message:', data.toString().substring(0, 500))
+        this.debug('Received message:', data.toString().substring(0, 500))
         this.handleMessage(data)
       })
 
       this.ws.on('close', (code, reason) => {
-        console.log('[Gateway] WebSocket closed:', { code, reason: reason.toString() })
+        this.debug('WebSocket closed:', { code, reason: reason.toString() })
         this.handleDisconnect(code, reason.toString())
       })
 
@@ -82,7 +90,7 @@ export class OpenClawGateway extends EventEmitter {
 
   async sendConnect() {
     if (this.connectSent || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      console.log('[Gateway] sendConnect skipped:', { 
+      this.debug('sendConnect skipped:', { 
         connectSent: this.connectSent, 
         wsReady: this.ws?.readyState, 
         wsOpen: this.ws?.readyState === WebSocket.OPEN 
@@ -94,7 +102,7 @@ export class OpenClawGateway extends EventEmitter {
 
     const connectParams = await this.buildConnectParams()
     
-    console.log('[Gateway] Sending connect frame with params:', {
+    this.debug('Sending connect frame with params:', {
       clientId: connectParams.client?.id,
       clientMode: connectParams.client?.mode,
       role: connectParams.role,
@@ -169,7 +177,7 @@ export class OpenClawGateway extends EventEmitter {
         ...(this.nonce ? { nonce: this.nonce } : {}),
       }
     } catch (e) {
-      console.log('[Gateway] Device identity generation failed, using legacy mode:', e.message)
+      this.debug('Device identity generation failed, using legacy mode:', e.message)
     }
 
     return params
@@ -256,13 +264,13 @@ export class OpenClawGateway extends EventEmitter {
       const frame = JSON.parse(data.toString())
 
       if (frame.type === 'event') {
-        console.log('[Gateway] Received event:', frame.event, 'payload keys:', frame.payload ? Object.keys(frame.payload) : null)
+        this.debug('Received event:', frame.event, 'payload keys:', frame.payload ? Object.keys(frame.payload) : null)
         
         if (frame.event === 'connect.challenge') {
-          console.log('[Gateway] Received connect.challenge, nonce:', frame.payload?.nonce?.substring(0, 16) + '...')
+          this.debug('Received connect.challenge, nonce:', frame.payload?.nonce?.substring(0, 16) + '...')
           this.nonce = frame.payload?.nonce
           if (this.nonce && !this.connectSent) {
-            console.log('[Gateway] Sending connect frame after challenge')
+            this.debug('Sending connect frame after challenge')
             this.sendConnect()
           }
         } else {
@@ -295,7 +303,7 @@ export class OpenClawGateway extends EventEmitter {
   }
 
   handleConnectResponse(frame) {
-    console.log('[Gateway] Connect response received:', {
+    this.debug('Connect response received:', {
       ok: frame.ok,
       error: frame.error,
       payloadKeys: frame.payload ? Object.keys(frame.payload) : null
@@ -309,29 +317,29 @@ export class OpenClawGateway extends EventEmitter {
       this.emit('connected', frame.payload)
       this.startHeartbeat()
       
-      console.log('[Gateway] Connected payload keys:', Object.keys(frame.payload || {}))
+      this.debug('Connected payload keys:', Object.keys(frame.payload || {}))
       
       const snapshot = frame.payload?.snapshot
-      console.log('[Gateway] Snapshot keys:', snapshot ? Object.keys(snapshot) : 'No snapshot')
+      this.debug('Snapshot keys:', snapshot ? Object.keys(snapshot) : 'No snapshot')
       
       const updateInfo = snapshot?.updateAvailable
       const serverVersion = frame.payload?.server?.version
-      console.log('[Gateway] Update info:', updateInfo)
-      console.log('[Gateway] Server version:', serverVersion)
+      this.debug('Update info:', updateInfo)
+      this.debug('Server version:', serverVersion)
       
       if (updateInfo) {
-        console.log('[Gateway] Emitting version event with:', updateInfo)
+        this.debug('Emitting version event with:', updateInfo)
         this.emit('version', updateInfo)
       } else if (serverVersion) {
-        console.log('[Gateway] Emitting version event with server version:', serverVersion)
+        this.debug('Emitting version event with server version:', serverVersion)
         this.emit('version', { currentVersion: serverVersion, latestVersion: serverVersion, channel: 'latest' })
       } else {
-        console.log('[Gateway] No version info found')
+        this.debug('No version info found')
       }
     } else {
       const error = frame.error?.message || 'Connection failed'
       console.error('[Gateway] Connect failed:', error)
-      console.error('[Gateway] Full error response:', JSON.stringify(frame.error, null, 2))
+      this.debug('Full error response:', JSON.stringify(frame.error, null, 2))
       this.emit('error', new Error(error))
       this.emit('stateChange', 'failed')
       this.ws?.close()
