@@ -1,5 +1,4 @@
 import MarkdownIt from 'markdown-it'
-import type { SanitizeOptions } from 'dompurify'
 import katex from 'katex'
 import hljs from 'highlight.js'
 

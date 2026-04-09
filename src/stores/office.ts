@@ -112,6 +112,8 @@ export const useOfficeStore = defineStore('office', () => {
   const error = ref('')
   const executionInProgress = ref(false)
   const pendingAgentCreations = ref<AgentTemplate[]>([])
+  const templates = ref<AgentTemplate[]>([])
+  const templatesLoading = ref(false)
 
   const officeAgents = computed<OfficeAgent[]>(() => {
     const agents = agentStore.agents
@@ -685,11 +687,91 @@ export const useOfficeStore = defineStore('office', () => {
       await Promise.all([
         agentStore.fetchAgents(),
         sessionStore.fetchSessions(),
+        fetchTemplates(),
+        fetchOfficeAgents(),
       ])
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Failed to load office data'
     } finally {
       loading.value = false
+    }
+  }
+
+  // ─── Backend API integration ────────────────────────────────────────────────
+
+  const API_BASE = '/api/office'
+
+  async function apiFetch(path: string, options?: RequestInit): Promise<any> {
+    const res = await fetch(API_BASE + path, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...options?.headers,
+      },
+    })
+    const json = await res.json()
+    if (!res.ok || !json.ok) {
+      throw new Error(json?.error?.message || `API error ${res.status}`)
+    }
+    return json.data ?? json
+  }
+
+  async function fetchTemplates(): Promise<void> {
+    templatesLoading.value = true
+    try {
+      const data = await apiFetch('/templates')
+      templates.value = data.data ?? data
+    } catch (e) {
+      console.warn('[Office] fetchTemplates failed:', e)
+      // Fallback: seed with defaults if API not available
+      if (templates.value.length === 0) {
+        templates.value = [
+          { id: 'tpl-customer-service', name: '客服助手', role: 'customer-service', emoji: '💬' },
+          { id: 'tpl-developer', name: '代码助手', role: 'developer', emoji: '💻' },
+          { id: 'tpl-data', name: '数据分析', role: 'data', emoji: '📊' },
+          { id: 'tpl-writer', name: '文档写作', role: 'writing', emoji: '✍️' },
+          { id: 'tpl-knowledge', name: '知识问答', role: 'knowledge', emoji: '🧠' },
+        ]
+      }
+    } finally {
+      templatesLoading.value = false
+    }
+  }
+
+  async function fetchOfficeAgents(): Promise<void> {
+    try {
+      const data = await apiFetch('/agents')
+      // Merge API agents with runtime agents from agentStore
+      const apiAgents: OfficeAgent[] = (data.data ?? data).map((a: any) => ({
+        id: a.id,
+        name: a.name,
+        description: a.description,
+        avatar: a.avatar,
+        color: a.config?.color || '#667eea',
+        status: a.status === 'active' ? 'idle' : 'offline',
+        currentTask: undefined,
+        position: { x: 0, y: 0 },
+        workspace: a.config?.workspace,
+        model: a.config?.model,
+        sessionCount: 0,
+        totalTokens: 0,
+        hasActiveSessions: false,
+        identity: a.config?.identity,
+        toolPolicy: a.config?.toolPolicy,
+      }))
+      // Add to agentStore if not already present
+      for (const apiAgent of apiAgents) {
+        const existing = agentStore.agents.find((a) => a.id === apiAgent.id)
+        if (!existing) {
+          try {
+            await agentStore.addAgent({ id: apiAgent.id, name: apiAgent.name })
+          } catch (e) {
+            // Agent may already exist via runtime
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[Office] fetchOfficeAgents failed:', e)
     }
   }
 
@@ -707,6 +789,8 @@ export const useOfficeStore = defineStore('office', () => {
     error,
     executionInProgress,
     pendingAgentCreations,
+    templates,
+    templatesLoading,
     officeAgents,
     selectedAgent,
     agentSessions,
@@ -743,5 +827,7 @@ export const useOfficeStore = defineStore('office', () => {
     createAgentsFromTemplates,
     setPendingAgentCreations,
     loadOfficeData,
+    fetchTemplates,
+    fetchOfficeAgents,
   }
 })

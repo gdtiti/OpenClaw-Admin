@@ -44,6 +44,7 @@ import {
 import { useI18n } from 'vue-i18n'
 import { useWebSocketStore } from '@/stores/websocket'
 import { useOfficeStore, type OfficeAgent } from '@/stores/office'
+import { useMyWorldStore } from '@/stores/myworld'
 import { useAgentStore } from '@/stores/agent'
 import { useSessionStore } from '@/stores/session'
 import { useChatStore } from '@/stores/chat'
@@ -54,6 +55,7 @@ import OfficeToolbar from '@/components/office/OfficeToolbar.vue'
 const { t } = useI18n()
 const wsStore = useWebSocketStore()
 const officeStore = useOfficeStore()
+const myworldStore = useMyWorldStore()
 const agentStore = useAgentStore()
 const sessionStore = useSessionStore()
 const chatStore = useChatStore()
@@ -153,8 +155,8 @@ function handleSelectAgent(id: string) { officeStore.selectAgent(id) }
 async function handleOpenChat(agentId: string) {
   officeStore.selectAgent(agentId)
   const sessions = sessionStore.sessions.filter(s => s.agentId === agentId)
-  if (sessions.length > 0) {
-    const latest = sessions.sort((a, b) => new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime())[0]
+  const latest = sessions.sort((a, b) => new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime())[0]
+  if (latest) {
     chatStore.setSessionKey(latest.key)
     await chatStore.fetchHistory(latest.key)
   }
@@ -228,7 +230,13 @@ async function handleSaveConfig() {
 
 // --- Load ---
 async function loadData() {
-  await Promise.all([officeStore.loadOfficeData(), agentStore.fetchAgents(), sessionStore.fetchSessions(), configStore.fetchConfig()])
+  await Promise.all([
+    officeStore.loadOfficeData(),
+    agentStore.fetchAgents(),
+    sessionStore.fetchSessions(),
+    configStore.fetchConfig(),
+    myworldStore.ensureDemoCompany().catch(() => {}),
+  ])
 }
 
 onMounted(async () => { await loadData() })

@@ -254,8 +254,8 @@ function formatTokens(n: number) {
 // --- Open Session ---
 async function handleOpenSession(agentId: string) {
   const sessions = sessionStore.sessions.filter(s => s.agentId === agentId)
-  if (sessions.length > 0) {
-    const latest = sessions.sort((a, b) => new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime())[0]
+  const latest = sessions.sort((a, b) => new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime())[0]
+  if (latest) {
     officeStore.selectSession(latest.key)
     chatStore.setSessionKey(latest.key)
     await chatStore.fetchHistory(latest.key)

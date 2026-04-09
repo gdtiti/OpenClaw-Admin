@@ -62,7 +62,7 @@ use([
 interface MetricCard {
   title: string
   value: number | string
-  icon: unknown
+  icon: string
   color: string
   suffix?: string
   trend?: number
@@ -93,7 +93,16 @@ const bitableConfig = ref<FeishuBitableConfig>({
 const dashboardData = ref<Record<string, unknown>>({})
 
 // ─── Static mock data (used when no Feishu config) ───────────────────────────
-const mockData = {
+const mockData: {
+  metrics: MetricCard[]
+  taskCompletionTrend: TrendData[]
+  commitTrend: CommitData[]
+  priorityDist: PriorityData[]
+  taskTypeDist: TaskTypeData[]
+  taskStatusDist: StatusData[]
+  testTypeDist: StatusData[]
+  projectHealth: AgentData[]
+} = {
   metrics: [
     { title: '总任务数', value: 128, icon: 'tasks', color: '#2080f0', trend: 12 },
     { title: '已完成', value: 89, icon: 'done', color: '#18a058', trend: 8 },
@@ -292,6 +301,7 @@ interface TaskTypeData {
 interface StatusData {
   name: string
   value: number
+  itemStyle?: { color: string }
 }
 
 interface AgentData {
@@ -322,7 +332,7 @@ const completionTrendOption = computed(() => ({
     backgroundColor: cardBgColor.value,
     borderColor: gridColor.value,
     textStyle: { color: textColor.value },
-    formatter: (params: Array<{ value: number }>) => `${params[0].name}<br/>完成率: <b>${params[0].value}%</b>`,
+    formatter: (params: Array<{ name: string; value: number }>) => `${params[0]?.name}<br/>完成率: <b>${params[0]?.value}%</b>`,
   },
   series: [
     {
@@ -371,7 +381,7 @@ const commitTrendOption = computed(() => ({
     backgroundColor: cardBgColor.value,
     borderColor: gridColor.value,
     textStyle: { color: textColor.value },
-    formatter: (params: Array<{ value: number }>) => `${params[0].name}<br/>提交: <b>${params[0].value} 次</b>`,
+    formatter: (params: Array<{ name: string; value: number }>) => `${params[0]?.name}<br/>提交: <b>${params[0]?.value} 次</b>`,
   },
   series: [
     {
@@ -405,7 +415,7 @@ const priorityDistOption = computed(() => ({
   grid: { top: 20, right: 20, bottom: 40, left: 20 },
   xAxis: { type: 'value', axisLine: { show: false }, axisTick: { show: false }, splitLine: { lineStyle: { color: gridColor.value } }, axisLabel: { color: textSecondaryColor.value, fontSize: 10 } },
   yAxis: { type: 'category', data: mockData.priorityDist.map((d) => d.name), axisLine: { show: false }, axisTick: { show: false }, axisLabel: { color: textColor.value, fontSize: 11 } },
-  tooltip: { trigger: 'axis', backgroundColor: cardBgColor.value, borderColor: gridColor.value, textStyle: { color: textColor.value }, formatter: (params: Array<{ value: number }>) => `<b>${params[0].name}</b>: ${params[0].value} 个` },
+  tooltip: { trigger: 'axis', backgroundColor: cardBgColor.value, borderColor: gridColor.value, textStyle: { color: textColor.value }, formatter: (params: Array<{ name: string; value: number }>) => `<b>${params[0]?.name}</b>: ${params[0]?.value} 个` },
   series: [{
     type: 'bar',
     data: mockData.priorityDist.map((d, i) => ({
@@ -434,7 +444,7 @@ const taskTypeDistOption = computed(() => ({
   grid: { top: 20, right: 20, bottom: 40, left: 50 },
   xAxis: { type: 'category', data: mockData.taskTypeDist.map((d) => d.name), axisLine: { lineStyle: { color: gridColor.value } }, axisLabel: { color: textSecondaryColor.value, fontSize: 10, rotate: 20 }, axisTick: { show: false } },
   yAxis: { type: 'value', axisLine: { show: false }, axisTick: { show: false }, splitLine: { lineStyle: { color: gridColor.value } }, axisLabel: { color: textSecondaryColor.value, fontSize: 10 } },
-  tooltip: { trigger: 'axis', backgroundColor: cardBgColor.value, borderColor: gridColor.value, textStyle: { color: textColor.value }, formatter: (params: Array<{ value: number }>) => `<b>${params[0].name}</b>: ${params[0].value} 个` },
+  tooltip: { trigger: 'axis', backgroundColor: cardBgColor.value, borderColor: gridColor.value, textStyle: { color: textColor.value }, formatter: (params: Array<{ name: string; value: number }>) => `<b>${params[0]?.name}</b>: ${params[0]?.value} 个` },
   series: [{
     type: 'bar',
     data: mockData.taskTypeDist.map((d) => ({
