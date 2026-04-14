@@ -23,15 +23,18 @@ import {
   TerminalOutline,
   DesktopOutline,
   ArchiveOutline,
+  SettingsOutline,
 } from '@vicons/ionicons5'
 import { NIcon } from 'naive-ui'
 import { routes } from '@/router/routes'
+import { useHermesConnectionStore } from '@/stores/hermes/connection'
 
 defineProps<{ collapsed: boolean }>()
 
 const route = useRoute()
 const router = useRouter()
 const { t } = useI18n()
+const connStore = useHermesConnectionStore()
 
 const iconMap: Record<string, unknown> = {
   GridOutline,
@@ -52,6 +55,7 @@ const iconMap: Record<string, unknown> = {
   TerminalOutline,
   DesktopOutline,
   ArchiveOutline,
+  SettingsOutline,
 }
 
 function renderIcon(iconName: string) {
@@ -64,8 +68,17 @@ const menuOptions = computed<MenuOption[]>(() => {
   const mainRoute = routes.find((r) => r.path === '/')
   if (!mainRoute?.children) return []
 
+  const currentGateway = connStore.currentGateway
+
   return mainRoute.children
-    .filter((child) => !child.meta?.hidden)
+    .filter((child) => {
+      if (child.meta?.hidden) return false
+
+      const gateway = child.meta?.gateway as string | undefined
+
+      // Only show routes matching the current gateway
+      return gateway === currentGateway
+    })
     .map((child) => ({
       label: child.meta?.titleKey ? t(child.meta.titleKey as string) : (child.meta?.title as string),
       key: child.name as string,
@@ -85,13 +98,13 @@ function handleSelect(key: string) {
 <template>
   <div style="display: flex; flex-direction: column; height: 100%;">
     <div style="display: flex; align-items: center; padding: 20px 24px; gap: 10px;">
-      <span style="font-size: 24px;">🦞</span>
+      <span style="font-size: 24px;">{{ connStore.currentGateway === 'hermes' ? '&#x1F54A;&#xFE0F;' : '&#x1F99E;' }}</span>
       <NText
         v-if="!collapsed"
         strong
         style="font-size: 18px; white-space: nowrap; letter-spacing: -0.5px;"
       >
-        OpenClaw-Admin
+        {{ connStore.currentGateway === 'hermes' ? 'Hermes' : 'OpenClaw-Admin' }}
       </NText>
     </div>
 

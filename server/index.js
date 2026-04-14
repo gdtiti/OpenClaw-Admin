@@ -13,6 +13,7 @@ import checkDiskSpace from 'check-disk-space'
 import { execSync } from 'child_process'
 import pty from 'node-pty'
 import db, { createBackupRecord, updateBackupRecord, getBackupRecord, getBackupRecords, getBackupRecordsCount, deleteBackupRecord } from './database.js'
+import hermesProxyRouter, { initHermesConfig } from './hermes-proxy.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -31,6 +32,9 @@ function loadEnvConfig() {
       AUTH_PASSWORD: '',
       MEDIA_DIR: '',
       LOG_LEVEL: 'INFO',
+      HERMES_WEB_URL: '',
+      HERMES_API_URL: '',
+      HERMES_API_KEY: '',
     }
   }
   const content = readFileSync(envPath, 'utf-8')
@@ -45,6 +49,9 @@ function loadEnvConfig() {
     AUTH_PASSWORD: parsed.AUTH_PASSWORD || '',
     MEDIA_DIR: parsed.MEDIA_DIR || '',
     LOG_LEVEL: parsed.LOG_LEVEL || 'INFO',
+    HERMES_WEB_URL: parsed.HERMES_WEB_URL || '',
+    HERMES_API_URL: parsed.HERMES_API_URL || '',
+    HERMES_API_KEY: parsed.HERMES_API_KEY || '',
   }
 }
 
@@ -69,11 +76,16 @@ const sessions = new Map()
 app.use(cors())
 app.use(express.json())
 
+// 初始化 Hermes 代理
+initHermesConfig(envConfig)
+app.use(hermesProxyRouter)
+
 let gateway = new OpenClawGateway(envConfig.OPENCLAW_WS_URL, envConfig.OPENCLAW_AUTH_TOKEN, envConfig.OPENCLAW_AUTH_PASSWORD, envConfig.LOG_LEVEL)
 
 const sseClients = new Map()
 
 const terminalSessions = new Map()
+const hermesCliSessions = new Map()
 const desktopSessions = new Map()
 
 function cleanupTerminalSession(sessionId) {
@@ -117,6 +129,96 @@ function cleanupOrphanedSessions() {
 }
 
 setInterval(cleanupOrphanedSessions, 5 * 60 * 1000)
+
+// ============ Hermes CLI Session Management ============
+
+const HERMES_CLI_OUTPUT_BUFFER_MAX = 64 * 1024 // 64KB ring buffer
+let hermesCliSessionCounter = 0
+
+function cleanupHermesCliSession(sessionId) {
+  const session = hermesCliSessions.get(sessionId)
+  if (!session) return false
+
+  try {
+    if (session.ptyProcess) {
+      session.ptyProcess.kill()
+    }
+  } catch (e) {
+    debug('[HermesCLI] Error killing PTY process:', e.message)
+  }
+
+  // Close response if still connected
+  if (session.res) {
+    try {
+      session.res.end()
+    } catch (e) {
+      // Ignore
+    }
+  }
+
+  hermesCliSessions.delete(sessionId)
+  console.log(`[HermesCLI] Session ${sessionId} (${session.name || 'unnamed'}) destroyed`)
+  return true
+}
+
+function detachHermesCliSession(sessionId) {
+  const session = hermesCliSessions.get(sessionId)
+  if (!session) return false
+
+  // Only remove the HTTP response reference, keep the PTY process running
+  if (session.res) {
+    try {
+      session.res.end()
+    } catch (e) {
+      // Ignore
+    }
+    session.res = null
+  }
+
+  console.log(`[HermesCLI] Session ${sessionId} (${session.name || 'unnamed'}) detached (process still running)`)
+  return true
+}
+
+function addOutputToBuffer(session, data) {
+  if (!session.outputBuffer) {
+    session.outputBuffer = []
+    session.outputBufferSize = 0
+  }
+  session.outputBuffer.push(data)
+  session.outputBufferSize += Buffer.byteLength(data, 'utf-8')
+
+  // Trim from the front if we exceed the buffer limit
+  while (session.outputBufferSize > HERMES_CLI_OUTPUT_BUFFER_MAX && session.outputBuffer.length > 1) {
+    const removed = session.outputBuffer.shift()
+    session.outputBufferSize -= Buffer.byteLength(removed, 'utf-8')
+  }
+}
+
+function cleanupAllHermesCliSessions() {
+  const sessionIds = [...hermesCliSessions.keys()]
+  console.log(`[HermesCLI] Cleaning up ${sessionIds.length} sessions...`)
+  for (const sessionId of sessionIds) {
+    cleanupHermesCliSession(sessionId)
+  }
+}
+
+function cleanupOrphanedHermesCliSessions() {
+  const now = Date.now()
+  const STALE_THRESHOLD = 2 * 60 * 60 * 1000 // 2 hours for Hermes CLI sessions
+
+  for (const [sessionId, session] of hermesCliSessions) {
+    const isStale = session.lastHeartbeat && (now - session.lastHeartbeat) > STALE_THRESHOLD
+    // Only consider orphaned if process has actually exited
+    const hasDeadProcess = !session.ptyProcess || session.ptyProcess.killed
+
+    if (isStale || hasDeadProcess) {
+      console.log(`[HermesCLI] Cleaning up orphaned session ${sessionId} (stale: ${isStale}, dead process: ${hasDeadProcess})`)
+      cleanupHermesCliSession(sessionId)
+    }
+  }
+}
+
+setInterval(cleanupOrphanedHermesCliSessions, 5 * 60 * 1000)
 
 let gatewayVersion = null
 let updateInfo = null
@@ -1268,6 +1370,298 @@ app.post('/api/terminal/heartbeat', authMiddleware, (req, res) => {
   }
 
   const session = terminalSessions.get(sessionId)
+  if (!session) {
+    return res.status(404).json({ ok: false, error: { message: 'Session not found' } })
+  }
+
+  session.lastHeartbeat = Date.now()
+  res.json({ ok: true })
+})
+
+// ============ Hermes CLI API ============
+
+const HERMES_CLI_PATH = '/data/user/work/hermes-agent/.venv/bin/hermes'
+const HERMES_HOME = '/data/user/work/hermes-agent'
+const HERMES_VENV_BIN = '/data/user/work/hermes-agent/.venv/bin'
+
+// GET /api/hermes-cli/sessions — List all sessions
+app.get('/api/hermes-cli/sessions', authMiddleware, (req, res) => {
+  const sessions = []
+  for (const [id, session] of hermesCliSessions) {
+    const isProcessAlive = session.ptyProcess && !session.ptyProcess.killed
+    sessions.push({
+      id,
+      name: session.name || null,
+      args: session.args || [],
+      createdAt: session.createdAt,
+      lastHeartbeat: session.lastHeartbeat,
+      status: isProcessAlive ? (session.res ? 'connected' : 'running') : 'exited',
+    })
+  }
+  res.json({ ok: true, sessions })
+})
+
+// POST /api/hermes-cli/sessions/rename — Rename a session
+app.post('/api/hermes-cli/sessions/rename', authMiddleware, (req, res) => {
+  const { sessionId, name } = req.body
+
+  if (!sessionId || !name) {
+    return res.status(400).json({ ok: false, error: { message: 'sessionId and name are required' } })
+  }
+
+  const session = hermesCliSessions.get(sessionId)
+  if (!session) {
+    return res.status(404).json({ ok: false, error: { message: 'Session not found' } })
+  }
+
+  session.name = name
+  console.log(`[HermesCLI] Session ${sessionId} renamed to "${name}"`)
+  res.json({ ok: true })
+})
+
+// GET /api/hermes-cli/stream — Create new or reconnect to existing session
+app.get('/api/hermes-cli/stream', authMiddleware, (req, res) => {
+  const cols = parseInt(req.query.cols) || 120
+  const rows = parseInt(req.query.rows) || 36
+  const existingSessionId = req.query.sessionId || null
+
+  res.setHeader('Content-Type', 'text/event-stream')
+  res.setHeader('Cache-Control', 'no-cache')
+  res.setHeader('Connection', 'keep-alive')
+  res.setHeader('X-Accel-Buffering', 'no')
+  res.flushHeaders()
+
+  // --- Reconnect to existing session ---
+  if (existingSessionId) {
+    const session = hermesCliSessions.get(existingSessionId)
+    if (!session) {
+      res.write(`data: ${JSON.stringify({ type: 'error', sessionId: existingSessionId, message: 'Session not found' })}\n\n`)
+      res.end()
+      return
+    }
+
+    if (!session.ptyProcess || session.ptyProcess.killed) {
+      res.write(`data: ${JSON.stringify({ type: 'error', sessionId: existingSessionId, message: 'Session process has exited' })}\n\n`)
+      res.end()
+      hermesCliSessions.delete(existingSessionId)
+      return
+    }
+
+    const sessionId = existingSessionId
+    const sendEvent = (type, data = {}) => {
+      try {
+        const event = { type, sessionId, ...data }
+        res.write(`data: ${JSON.stringify(event)}\n\n`)
+        if (typeof res.flush === 'function') {
+          res.flush()
+        }
+        return true
+      } catch (e) {
+        console.error('[HermesCLI] Error sending event:', e.message)
+        return false
+      }
+    }
+
+    // Attach new response to existing session
+    session.res = res
+    session.lastHeartbeat = Date.now()
+
+    // Send connected event FIRST (before buffer replay)
+    console.log(`[HermesCLI] Session ${sessionId} (${session.name || 'unnamed'}) reconnected (size: ${cols}x${rows})`)
+    sendEvent('connected', { cols, rows, reconnect: true })
+
+    // Resize PTY to match new client dimensions
+    try {
+      session.ptyProcess.resize(cols, rows)
+    } catch (e) {
+      // Ignore resize errors on reconnect
+    }
+
+    // Replay output buffer AFTER connected event
+    if (session.outputBuffer && session.outputBuffer.length > 0) {
+      for (const chunk of session.outputBuffer) {
+        sendEvent('output', { data: chunk })
+      }
+    }
+
+    req.on('close', () => {
+      console.log(`[HermesCLI] Client disconnected from session ${sessionId}, detaching (process stays alive)`)
+      detachHermesCliSession(sessionId)
+    })
+
+    req.on('error', (err) => {
+      console.error(`[HermesCLI] Request error for session ${sessionId}:`, err.message)
+      detachHermesCliSession(sessionId)
+    })
+
+    return
+  }
+
+  // --- Create new session ---
+  const sessionId = randomUUID()
+  const now = Date.now()
+  hermesCliSessionCounter++
+  const sessionName = `Session #${hermesCliSessionCounter}`
+
+  // Parse CLI args from query
+  const cliArgs = []
+  const queryArgs = req.query.args
+  if (queryArgs) {
+    if (Array.isArray(queryArgs)) {
+      cliArgs.push(...queryArgs)
+    } else {
+      cliArgs.push(...queryArgs.split(' '))
+    }
+  }
+
+  const sendEvent = (type, data = {}) => {
+    try {
+      const event = { type, sessionId, ...data }
+      res.write(`data: ${JSON.stringify(event)}\n\n`)
+      if (typeof res.flush === 'function') {
+        res.flush()
+      }
+      return true
+    } catch (e) {
+      console.error('[HermesCLI] Error sending event:', e.message)
+      return false
+    }
+  }
+
+  try {
+    const hermesEnv = {
+      ...process.env,
+      TERM: 'xterm-256color',
+      HERMES_HOME: HERMES_HOME,
+      PATH: `${HERMES_VENV_BIN}:${process.env.PATH || ''}`,
+    }
+
+    const ptyProcess = pty.spawn(HERMES_CLI_PATH, cliArgs, {
+      name: 'xterm-256color',
+      cols,
+      rows,
+      cwd: HERMES_HOME,
+      env: hermesEnv,
+    })
+
+    hermesCliSessions.set(sessionId, {
+      ptyProcess,
+      res,
+      createdAt: now,
+      lastHeartbeat: now,
+      name: sessionName,
+      args: cliArgs,
+      outputBuffer: [],
+      outputBufferSize: 0,
+    })
+
+    ptyProcess.onData((data) => {
+      try {
+        const session = hermesCliSessions.get(sessionId)
+        if (session) {
+          addOutputToBuffer(session, data)
+        }
+        const sent = sendEvent('output', { data })
+        if (!sent) {
+          console.log(`[HermesCLI] Failed to send output for session ${sessionId}, detaching`)
+          detachHermesCliSession(sessionId)
+        }
+      } catch (e) {
+        console.error('[HermesCLI] Error sending output:', e.message)
+        detachHermesCliSession(sessionId)
+      }
+    })
+
+    ptyProcess.onExit(({ exitCode }) => {
+      console.log(`[HermesCLI] Session ${sessionId} (${sessionName}) exited with code ${exitCode}`)
+      sendEvent('disconnected', { message: `Process exited with code ${exitCode}` })
+      hermesCliSessions.delete(sessionId)
+    })
+
+    console.log(`[HermesCLI] Session ${sessionId} (${sessionName}) created (args: ${cliArgs.join(' ') || 'none'}, size: ${cols}x${rows})`)
+    sendEvent('connected', { cols, rows, name: sessionName })
+
+    req.on('close', () => {
+      console.log(`[HermesCLI] Client disconnected from session ${sessionId}, detaching (process stays alive)`)
+      detachHermesCliSession(sessionId)
+    })
+
+    req.on('error', (err) => {
+      console.error(`[HermesCLI] Request error for session ${sessionId}:`, err.message)
+      detachHermesCliSession(sessionId)
+    })
+
+  } catch (err) {
+    console.error('[HermesCLI] Failed to create PTY:', err.message)
+    sendEvent('error', { message: `Failed to create Hermes CLI terminal: ${err.message}` })
+    res.end()
+  }
+})
+
+app.post('/api/hermes-cli/input', authMiddleware, (req, res) => {
+  const { sessionId, data } = req.body
+
+  if (!sessionId || !data) {
+    return res.status(400).json({ ok: false, error: { message: 'sessionId and data are required' } })
+  }
+
+  const session = hermesCliSessions.get(sessionId)
+  if (!session) {
+    return res.status(404).json({ ok: false, error: { message: 'Session not found' } })
+  }
+
+  try {
+    session.ptyProcess.write(data)
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('[HermesCLI] Error writing to PTY:', err.message)
+    res.status(500).json({ ok: false, error: { message: err.message } })
+  }
+})
+
+app.post('/api/hermes-cli/resize', authMiddleware, (req, res) => {
+  const { sessionId, cols, rows } = req.body
+
+  if (!sessionId || cols === undefined || rows === undefined) {
+    return res.status(400).json({ ok: false, error: { message: 'sessionId, cols, and rows are required' } })
+  }
+
+  const session = hermesCliSessions.get(sessionId)
+  if (!session) {
+    return res.status(404).json({ ok: false, error: { message: 'Session not found' } })
+  }
+
+  try {
+    session.ptyProcess.resize(cols, rows)
+    res.json({ ok: true, cols, rows })
+  } catch (err) {
+    console.error('[HermesCLI] Error resizing PTY:', err.message)
+    res.status(500).json({ ok: false, error: { message: err.message } })
+  }
+})
+
+app.post('/api/hermes-cli/destroy', authMiddleware, (req, res) => {
+  const { sessionId } = req.body
+
+  if (!sessionId) {
+    return res.status(400).json({ ok: false, error: { message: 'sessionId is required' } })
+  }
+
+  const cleaned = cleanupHermesCliSession(sessionId)
+  if (cleaned) {
+    console.log(`[HermesCLI] Session ${sessionId} destroyed via API`)
+  }
+  res.json({ ok: true, message: cleaned ? 'Session destroyed' : 'Session already destroyed' })
+})
+
+app.post('/api/hermes-cli/heartbeat', authMiddleware, (req, res) => {
+  const { sessionId } = req.body
+
+  if (!sessionId) {
+    return res.status(400).json({ ok: false, error: { message: 'sessionId is required' } })
+  }
+
+  const session = hermesCliSessions.get(sessionId)
   if (!session) {
     return res.status(404).json({ ok: false, error: { message: 'Session not found' } })
   }
