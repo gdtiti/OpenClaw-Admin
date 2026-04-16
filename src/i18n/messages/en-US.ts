@@ -2829,6 +2829,7 @@ export default {
       connectionHint: 'Configure Hermes gateway connection parameters. The system will automatically try to reconnect after saving.',
       connectionSaved: 'Connection config saved',
       connectionSaveFailed: 'Failed to save connection config',
+      apiKeyUpdateFailed: 'Failed to update API Key',
       testConnection: 'Test Connection',
       testSuccess: 'Connection test succeeded',
       testFailed: 'Connection test failed',
@@ -2846,6 +2847,9 @@ export default {
         sectionEndpointsHint: 'Configure the Hermes gateway Web UI and API service addresses.',
         sectionAuth: 'Authentication',
         sectionAuthHint: 'Set an API Key for authentication. Leave empty to disable authentication.',
+        apiKeyPlaceholder: 'Enter API Key',
+        apiKeyPlaceholderLoaded: 'Enter new API Key (leave empty to keep current)',
+        apiKeyLoadedHint: 'API Key loaded from config file. Enter a new value to override.',
       },
       status: {
         connectionStatus: 'Connection Status',

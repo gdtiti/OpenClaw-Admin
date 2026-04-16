@@ -167,8 +167,10 @@ onMounted(async () => {
   connForm.value = {
     webUrl: connectionStore.connectionConfig.webUrl,
     apiUrl: connectionStore.connectionConfig.apiUrl,
-    apiKey: connectionStore.connectionConfig.apiKey,
+    apiKey: '', // 不显示实际值，用户输入新值才会更新
   }
+  
+  // 尝试加载配置（连接失败时会静默失败）
   await configStore.fetchConfig()
   if (configStore.config) {
     configValues.value = { ...configStore.config }
@@ -179,7 +181,28 @@ onMounted(async () => {
 
 async function handleSaveConnection() {
   try {
-    connectionStore.updateConnectionConfig(connForm.value)
+    // 检查 API Key 是否有变化
+    // 如果后端已加载 API Key，用户输入为空表示不修改
+    const formApiKey = connForm.value.apiKey
+    
+    // 判断是否需要更新 API Key（用户输入了新值）
+    const needsUpdate = formApiKey && formApiKey !== ''
+    
+    if (needsUpdate) {
+      // 如果 API Key 有变化，调用后端 API 更新并验证
+      const result = await connectionStore.updateApiKey(formApiKey, true)
+      if (!result.ok) {
+        message.error(t('pages.hermesSystem.apiKeyUpdateFailed') + ': ' + result.error)
+        return
+      }
+    }
+    
+    // 更新其他连接配置
+    connectionStore.updateConnectionConfig({
+      webUrl: connForm.value.webUrl,
+      apiUrl: connForm.value.apiUrl,
+    })
+    
     message.success(t('pages.hermesSystem.connectionSaved'))
   } catch {
     message.error(t('pages.hermesSystem.connectionSaveFailed'))
@@ -522,17 +545,24 @@ async function handleSaveEditEnv(key: string) {
               <NText strong style="font-size: 15px; display: block; margin-bottom: 12px;">
                 {{ t('pages.hermesSystem.form.sectionAuth') }}
               </NText>
-              <NText depth="3" style="font-size: 13px; display: block; margin-bottom: 16px;">
+              <NText depth="3" style="font-size: 12px;">
                 {{ t('pages.hermesSystem.form.sectionAuthHint') }}
               </NText>
               <NForm label-placement="left" label-width="120" style="max-width: 600px;">
                 <NFormItem :label="t('pages.hermesSystem.form.apiKey')">
-                  <NInput
-                    v-model:value="connForm.apiKey"
-                    type="password"
-                    show-password-on="click"
-                    placeholder="API Key"
-                  />
+                  <NSpace vertical :size="4" style="width: 100%;">
+                    <NInput
+                      v-model:value="connForm.apiKey"
+                      type="password"
+                      show-password-on="click"
+                      :placeholder="connectionStore.hasApiKeyFromEnv 
+                        ? t('pages.hermesSystem.form.apiKeyPlaceholderLoaded') 
+                        : t('pages.hermesSystem.form.apiKeyPlaceholder')"
+                    />
+                    <NText v-if="connectionStore.hasApiKeyFromEnv" depth="3" style="font-size: 11px;">
+                      {{ t('pages.hermesSystem.form.apiKeyLoadedHint') }}
+                    </NText>
+                  </NSpace>
                 </NFormItem>
               </NForm>
             </div>

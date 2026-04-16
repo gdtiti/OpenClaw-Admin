@@ -394,16 +394,100 @@ export const useHermesChatStore = defineStore('hermes-chat', () => {
 
     try {
       const msgs = await client.getSessionMessages(sessionId)
-      if (sessionModel) {
-        messages.value = msgs.map((msg) => {
-          if (msg.role === 'assistant' && !msg.model) {
-            return { ...msg, model: sessionModel }
+      console.log('[HermesChatStore] Loaded messages:', msgs.length)
+      
+      // 处理历史消息：从助手消息的 tool_calls 中提取工具名称，关联到工具结果消息
+      const processedMsgs: HermesMessage[] = []
+      const toolCallMap = new Map<string, string>() // toolCallId -> toolName
+      let lastToolCallName: string | undefined // 记录最近的工具调用名称
+      
+      for (let i = 0; i < msgs.length; i++) {
+        const msg = msgs[i]!
+        
+        // 检查助手消息是否包含 tool_calls（直接在消息对象上，不是在 content 中）
+        if (msg.role === 'assistant') {
+          // 检查消息对象上的 tool_calls 字段
+          const rawMsg = msg as unknown as Record<string, unknown>
+          const toolCalls = rawMsg.tool_calls as Array<{ id?: string; function?: { name?: string }; name?: string }> | null
+          
+          if (toolCalls && Array.isArray(toolCalls)) {
+            for (const tc of toolCalls) {
+              const tcName = tc.function?.name || tc.name
+              if (tc.id && tcName) {
+                toolCallMap.set(tc.id, tcName)
+                lastToolCallName = tcName
+              }
+            }
           }
-          return msg
-        })
-      } else {
-        messages.value = msgs
+          
+          // 也尝试从 content 解析（兼容旧格式）
+          if (msg.content) {
+            try {
+              const contentObj = JSON.parse(msg.content)
+              if (contentObj.tool_calls && Array.isArray(contentObj.tool_calls)) {
+                for (const tc of contentObj.tool_calls) {
+                  if (tc.id && (tc.function?.name || tc.name || tc.tool_name)) {
+                    toolCallMap.set(tc.id, tc.function?.name || tc.name || tc.tool_name)
+                    lastToolCallName = tc.function?.name || tc.name || tc.tool_name
+                  }
+                }
+              }
+            } catch {
+              // content 不是 JSON
+            }
+          }
+        }
+        
+        // 处理工具消息：尝试从多个来源获取工具名称
+        if (msg.role === 'tool') {
+          let toolName = msg.toolName || msg.name
+          
+          // 如果没有 toolName，尝试从 content 解析
+          if (!toolName && msg.content) {
+            try {
+              const parsed = JSON.parse(msg.content)
+              toolName = parsed.tool_name || parsed.name || parsed.toolName
+            } catch {
+              // ignore
+            }
+          }
+          
+          // 如果还是没有，尝试从 toolCallMap 获取
+          if (!toolName && msg.toolCallId) {
+            toolName = toolCallMap.get(msg.toolCallId)
+          }
+          
+          // 如果还是没有，使用最近的工具调用名称
+          if (!toolName && lastToolCallName) {
+            toolName = lastToolCallName
+          }
+          
+          // 如果还是没有，尝试从相邻的助手消息推断
+          if (!toolName && i > 0) {
+            const prevMsg = processedMsgs[processedMsgs.length - 1]
+            if (prevMsg?.role === 'assistant') {
+              const rawPrevMsg = prevMsg as unknown as Record<string, unknown>
+              const prevToolCalls = rawPrevMsg.tool_calls as Array<{ function?: { name?: string }; name?: string }> | null
+              if (prevToolCalls && prevToolCalls.length > 0) {
+                const lastTc = prevToolCalls[prevToolCalls.length - 1]
+                toolName = lastTc?.function?.name || lastTc?.name
+              }
+            }
+          }
+          
+          processedMsgs.push({
+            ...msg,
+            toolName: toolName || undefined,
+          })
+        } else if (msg.role === 'assistant' && !msg.model && sessionModel) {
+          processedMsgs.push({ ...msg, model: sessionModel })
+        } else {
+          processedMsgs.push(msg)
+        }
       }
+      
+      messages.value = processedMsgs
+      console.log('[HermesChatStore] Processed messages, toolCallMap size:', toolCallMap.size)
     } catch (err) {
       messages.value = []
       error.value = err instanceof Error ? err.message : String(err)

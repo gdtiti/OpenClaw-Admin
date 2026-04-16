@@ -10,6 +10,7 @@ import {
   NIcon,
   NGrid,
   NGridItem,
+  NInput,
   NSpace,
   NSpin,
   NSwitch,

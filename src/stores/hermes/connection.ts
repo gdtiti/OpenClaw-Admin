@@ -46,6 +46,8 @@ export const useHermesConnectionStore = defineStore('hermes-connection', () => {
   const hermesError = ref<string | null>(null)
   const connectionConfig = ref<HermesConnectionConfig>(readStoredConnectionConfig())
   const hermesStatus = ref<HermesStatus | null>(null)
+  const initializedFromBackend = ref(false)
+  const hasApiKeyFromEnv = ref(false) // 标记 API Key 是否从 .env 文件加载
 
   // ---- 内部 ----
 
@@ -68,6 +70,11 @@ export const useHermesConnectionStore = defineStore('hermes-connection', () => {
     },
     { deep: true },
   )
+
+  // 初始化：如果当前网关是 Hermes，自动加载配置
+  if (currentGateway.value === 'hermes' && !initializedFromBackend.value) {
+    loadConfigFromBackend()
+  }
 
   // ---- 计算属性 ----
 
@@ -93,14 +100,48 @@ export const useHermesConnectionStore = defineStore('hermes-connection', () => {
   // ---- 方法 ----
 
   /**
+   * 从后端加载连接配置（从 .env 文件读取）
+   */
+  async function loadConfigFromBackend(): Promise<void> {
+    try {
+      const response = await fetch('/api/hermes/connect')
+      if (response.ok) {
+        const data = await response.json()
+        connectionConfig.value = {
+          webUrl: data.webUrl || connectionConfig.value.webUrl,
+          apiUrl: data.apiUrl || connectionConfig.value.apiUrl,
+          apiKey: '', // 不暴露实际值，后端会自动使用内存中的 API Key
+        }
+        hasApiKeyFromEnv.value = !!data.hasApiKey
+        initializedFromBackend.value = true
+        console.log('[Hermes] Config loaded from backend, hasApiKey:', data.hasApiKey)
+        
+        // 自动尝试连接
+        if (!hermesConnected.value && !hermesConnecting.value) {
+          connect().catch(() => {
+            // 连接失败是正常的，会自动重试
+          })
+        }
+      }
+    } catch (error) {
+      console.warn('[Hermes] Failed to load config from backend:', error)
+    }
+  }
+
+  /**
    * 切换网关
    */
-  function switchGateway(gateway: 'openclaw' | 'hermes') {
+  async function switchGateway(gateway: 'openclaw' | 'hermes') {
     if (gateway === currentGateway.value) return
     if (gateway === 'openclaw') {
       disconnect()
     }
     currentGateway.value = gateway
+    
+    // 切换到 Hermes 时自动加载配置并连接
+    if (gateway === 'hermes' && !initializedFromBackend.value) {
+      await loadConfigFromBackend()
+    }
   }
 
   /**
@@ -115,6 +156,41 @@ export const useHermesConnectionStore = defineStore('hermes-connection', () => {
     if (hermesConnected.value) {
       disconnect()
       connect()
+    }
+  }
+
+  /**
+   * 更新 API Key 并同步到后端 .env 文件
+   */
+  async function updateApiKey(apiKey: string, validate = true): Promise<{ ok: boolean; error?: string }> {
+    try {
+      const response = await fetch('/api/hermes/api-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey, validate }),
+      })
+      const result = await response.json()
+      
+      if (result.ok) {
+        // 更新本地配置
+        connectionConfig.value = {
+          ...connectionConfig.value,
+          apiKey,
+        }
+        // 如果已连接，用新配置重新连接
+        if (hermesConnected.value) {
+          disconnect()
+          await connect()
+        }
+        return { ok: true }
+      }
+      
+      return { ok: false, error: result.error || 'Failed to update API Key' }
+    } catch (error) {
+      return { 
+        ok: false, 
+        error: error instanceof Error ? error.message : String(error) 
+      }
     }
   }
 
@@ -139,7 +215,12 @@ export const useHermesConnectionStore = defineStore('hermes-connection', () => {
     } catch (error) {
       hermesConnected.value = false
       hermesError.value = error instanceof Error ? error.message : String(error)
-      console.error('[HermesConnection] Connect failed:', error)
+      // 第一次连接失败是正常的，会自动重试
+      if (reconnectAttempts === 0) {
+        console.debug('[HermesConnection] Initial connection attempt failed, will retry...')
+      } else {
+        console.warn('[HermesConnection] Connect failed:', error)
+      }
       scheduleReconnect()
       return false
     } finally {
@@ -227,11 +308,15 @@ export const useHermesConnectionStore = defineStore('hermes-connection', () => {
     hermesError,
     connectionConfig,
     hermesStatus,
+    initializedFromBackend,
+    hasApiKeyFromEnv,
     // 方法
     getClient,
     getClientAsync,
     switchGateway,
     updateConnectionConfig,
+    updateApiKey,
+    loadConfigFromBackend,
     connect,
     disconnect,
     testConnection,

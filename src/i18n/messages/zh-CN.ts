@@ -2833,6 +2833,7 @@ export default {
       connectionHint: '配置 Hermes 网关的连接参数。保存后系统会自动尝试重新连接。',
       connectionSaved: '连接配置已保存',
       connectionSaveFailed: '保存连接配置失败',
+      apiKeyUpdateFailed: 'API Key 更新失败',
       testConnection: '测试连接',
       testSuccess: '连接测试成功',
       testFailed: '连接测试失败',
@@ -2850,6 +2851,9 @@ export default {
         sectionEndpointsHint: '配置 Hermes 网关的 Web 界面和 API 服务地址。',
         sectionAuth: '认证配置',
         sectionAuthHint: '设置 API Key 用于身份验证，留空则不使用认证。',
+        apiKeyPlaceholder: '输入 API Key',
+        apiKeyPlaceholderLoaded: '输入新的 API Key（留空保持不变）',
+        apiKeyLoadedHint: '已从配置文件加载 API Key，输入新值将覆盖',
       },
       status: {
         connectionStatus: '连接状态',

@@ -23,8 +23,8 @@ function renderLabel(option: { label: string; value: string }) {
   ])
 }
 
-function handleChange(val: string) {
-  connStore.switchGateway(val as 'openclaw' | 'hermes')
+async function handleChange(val: string) {
+  await connStore.switchGateway(val as 'openclaw' | 'hermes')
 }
 </script>
 

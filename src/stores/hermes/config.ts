@@ -22,20 +22,22 @@ export const useHermesConfigStore = defineStore('hermes-config', () => {
    */
   async function fetchConfig() {
     const connStore = useHermesConnectionStore()
-    const client = await connStore.getClientAsync()
-    if (!client) {
-      throw new Error('Hermes 未连接')
-    }
-
+    
     loading.value = true
     lastError.value = null
 
     try {
+      const client = await connStore.getClientAsync()
       config.value = await client.getConfig()
     } catch (error) {
       config.value = null
       lastError.value = error instanceof Error ? error.message : String(error)
-      console.error('[HermesConfigStore] fetchConfig failed:', error)
+      // 连接失败是正常的重试行为，不打印警告
+      if (error instanceof Error && error.message.includes('连接失败')) {
+        console.debug('[HermesConfigStore] fetchConfig: waiting for connection...')
+      } else {
+        console.warn('[HermesConfigStore] fetchConfig failed:', error)
+      }
     } finally {
       loading.value = false
     }

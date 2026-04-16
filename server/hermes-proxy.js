@@ -1,7 +1,83 @@
 import { Router } from 'express'
 import http from 'http'
+import fs from 'fs'
+import path from 'path'
+import { fileURLToPath } from 'url'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+const ENV_FILE_PATH = path.join(__dirname, '..', '.env')
 
 const router = Router()
+
+// 认证中间件（由外部设置）
+let authMiddleware = null
+
+// 设置认证中间件
+export function setAuthMiddleware(middleware) {
+  authMiddleware = middleware
+  console.log('[Hermes] Auth middleware configured')
+}
+
+// 应用认证中间件的路由前缀列表
+// 注意：/api/hermes/api-key 不需要认证（设置 API Key 的接口）
+const AUTH_REQUIRED_PREFIXES = [
+  '/api/hermes/test-connection',
+  '/api/hermes/status',
+  '/api/hermes/sessions',
+  '/api/hermes/config',
+  '/api/hermes/env',
+  '/api/hermes/logs',
+  '/api/hermes/cron',
+  '/api/hermes/skills',
+  '/api/hermes/tools',
+  '/api/hermes/analytics',
+  '/api/hermes/v1/',
+  '/api/hermes/health',
+]
+
+// 不需要认证的特定路由
+const AUTH_EXEMPT_ROUTES = [
+  '/api/hermes/connect',      // GET 获取配置 / POST 设置配置
+  '/api/hermes/api-key',      // POST 设置 API Key
+]
+
+// 检查路由是否需要认证
+function requiresAuth(path, method) {
+  // 检查是否在豁免列表中
+  if (AUTH_EXEMPT_ROUTES.some(route => path === route)) {
+    return false
+  }
+  return AUTH_REQUIRED_PREFIXES.some(prefix => path.startsWith(prefix))
+}
+
+// 认证中间件包装器 - 使用 HERMES_API_KEY 认证
+function authWrapper(req, res, next) {
+  if (!requiresAuth(req.path, req.method)) {
+    return next()
+  }
+
+  // 使用 HERMES_API_KEY 进行认证
+  const serverApiKey = hermesConfig.apiKey
+  if (!serverApiKey) {
+    // 没有配置 API Key，允许访问（向后兼容）
+    return next()
+  }
+
+  // 检查请求中的 Authorization 头
+  const clientAuth = req.headers.authorization
+  const bearerMatch = clientAuth ? clientAuth.match(/^Bearer\s+(.+)$/i) : null
+  const clientToken = bearerMatch ? bearerMatch[1].trim() : null
+
+  // 如果客户端提供了正确的 API Key，或者没有提供 API Key（代理会使用服务器的）
+  // 都允许访问。代理服务器会在 buildProxyHeaders 中处理认证。
+  if (!clientToken || clientToken === serverApiKey) {
+    return next()
+  }
+
+  // 客户端提供了错误的 API Key
+  res.status(401).json({ error: 'Unauthorized', message: 'Invalid Hermes API Key' })
+}
 
 // Hermes 连接配置（内存存储）
 let hermesConfig = {
@@ -10,11 +86,104 @@ let hermesConfig = {
   apiKey: '',
 }
 
-// 初始化配置（从环境变量）
+// 读取 .env 文件
+function readEnvFile() {
+  try {
+    if (!fs.existsSync(ENV_FILE_PATH)) {
+      console.log('[Hermes] .env file not found, creating from .env.example')
+      const examplePath = path.join(__dirname, '..', '.env.example')
+      if (fs.existsSync(examplePath)) {
+        fs.copyFileSync(examplePath, ENV_FILE_PATH)
+      } else {
+        return {}
+      }
+    }
+    const content = fs.readFileSync(ENV_FILE_PATH, 'utf-8')
+    const env = {}
+    content.split('\n').forEach(line => {
+      const trimmed = line.trim()
+      if (!trimmed || trimmed.startsWith('#')) return
+      const eqIndex = trimmed.indexOf('=')
+      if (eqIndex > 0) {
+        const key = trimmed.substring(0, eqIndex).trim()
+        let value = trimmed.substring(eqIndex + 1).trim()
+        // 移除引号
+        if ((value.startsWith('"') && value.endsWith('"')) ||
+            (value.startsWith("'") && value.endsWith("'"))) {
+          value = value.slice(1, -1)
+        }
+        env[key] = value
+      }
+    })
+    return env
+  } catch (err) {
+    console.error('[Hermes] Failed to read .env file:', err.message)
+    return {}
+  }
+}
+
+// 写入 .env 文件
+function writeEnvFile(env) {
+  try {
+    const lines = []
+    // 读取现有文件以保留注释和顺序
+    let existingContent = ''
+    const existingKeys = new Set()
+    
+    if (fs.existsSync(ENV_FILE_PATH)) {
+      existingContent = fs.readFileSync(ENV_FILE_PATH, 'utf-8')
+      existingContent.split('\n').forEach(line => {
+        const trimmed = line.trim()
+        if (!trimmed || trimmed.startsWith('#')) {
+          lines.push(line)
+          return
+        }
+        const eqIndex = trimmed.indexOf('=')
+        if (eqIndex > 0) {
+          const key = trimmed.substring(0, eqIndex).trim()
+          existingKeys.add(key)
+          if (env[key] !== undefined) {
+            lines.push(`${key}=${env[key]}`)
+          } else {
+            lines.push(line)
+          }
+        } else {
+          lines.push(line)
+        }
+      })
+    }
+    
+    // 添加新的键
+    for (const [key, value] of Object.entries(env)) {
+      if (!existingKeys.has(key)) {
+        lines.push(`${key}=${value}`)
+      }
+    }
+    
+    fs.writeFileSync(ENV_FILE_PATH, lines.join('\n'), 'utf-8')
+    console.log('[Hermes] .env file updated')
+    return true
+  } catch (err) {
+    console.error('[Hermes] Failed to write .env file:', err.message)
+    return false
+  }
+}
+
+// 更新单个环境变量
+function updateEnvVar(key, value) {
+  const env = readEnvFile()
+  env[key] = value
+  return writeEnvFile(env)
+}
+
+// 初始化配置（从环境变量和 .env 文件）
 export function initHermesConfig(envConfig) {
-  hermesConfig.webUrl = envConfig.HERMES_WEB_URL || 'http://localhost:9119'
-  hermesConfig.apiUrl = envConfig.HERMES_API_URL || 'http://localhost:8642'
-  hermesConfig.apiKey = envConfig.HERMES_API_KEY || ''
+  // 优先从 .env 文件读取
+  const envFile = readEnvFile()
+  
+  hermesConfig.webUrl = envFile.HERMES_WEB_URL || envConfig.HERMES_WEB_URL || 'http://localhost:9119'
+  hermesConfig.apiUrl = envFile.HERMES_API_URL || envConfig.HERMES_API_URL || 'http://localhost:8642'
+  hermesConfig.apiKey = envFile.HERMES_API_KEY || envConfig.HERMES_API_KEY || ''
   console.log(`[Hermes] Proxy initialized: web=${hermesConfig.webUrl}, api=${hermesConfig.apiUrl}`)
 }
 
@@ -36,10 +205,6 @@ function getHermesApiKey() {
 
 function buildProxyHeaders(req) {
   const headers = {}
-  // 转发 Authorization
-  if (req.headers.authorization) {
-    headers['Authorization'] = req.headers.authorization
-  }
   // 转发 Content-Type
   if (req.headers['content-type']) {
     headers['Content-Type'] = req.headers['content-type']
@@ -49,10 +214,33 @@ function buildProxyHeaders(req) {
     headers['X-Hermes-Session-Id'] = req.headers['x-hermes-session-id']
     console.log('[Hermes] Forwarding X-Hermes-Session-Id:', req.headers['x-hermes-session-id'])
   }
-  // 如果有 Hermes API Key 且请求中没有 Authorization，则添加
-  const apiKey = getHermesApiKey()
-  if (apiKey && !headers['Authorization']) {
-    headers['Authorization'] = `Bearer ${apiKey}`
+
+  // 获取服务器配置的 API Key
+  const serverApiKey = getHermesApiKey()
+
+  // 检查请求中的 Authorization 头是否有效
+  const clientAuth = req.headers.authorization
+  const bearerMatch = clientAuth ? clientAuth.match(/^Bearer\s+(.+)$/i) : null
+  const clientToken = bearerMatch ? bearerMatch[1].trim() : null
+
+  // 如果客户端提供了有效的 token 且与服务器配置的 API Key 匹配，则使用客户端的
+  // 否则使用服务器配置的 API Key
+  if (clientToken && serverApiKey && clientToken === serverApiKey) {
+    headers['Authorization'] = `Bearer ${clientToken}`
+    console.log('[Hermes] Forwarding valid client Authorization')
+  } else if (serverApiKey) {
+    headers['Authorization'] = `Bearer ${serverApiKey}`
+    if (clientToken && clientToken !== serverApiKey) {
+      console.log('[Hermes] Client token mismatch, using server HERMES_API_KEY')
+    } else {
+      console.log('[Hermes] Using server HERMES_API_KEY for authentication')
+    }
+  } else if (clientToken) {
+    // 没有服务器配置的 API Key，但客户端提供了 token，尝试转发
+    headers['Authorization'] = `Bearer ${clientToken}`
+    console.log('[Hermes] Forwarding client Authorization (no server HERMES_API_KEY)')
+  } else {
+    console.log('[Hermes] WARNING: No Authorization header available')
   }
   return headers
 }
@@ -74,7 +262,20 @@ function proxyRequest(req, res, targetBaseUrl, path) {
       headers,
     }
 
+    console.log('[Hermes] Proxying request:', req.method, path, '->', targetUrl.toString())
+
     const proxyReq = http.request(options, (proxyRes) => {
+      console.log('[Hermes] Response from upstream:', proxyRes.statusCode, path)
+      
+      // 如果是 401 错误，记录响应体以便调试
+      if (proxyRes.statusCode === 401) {
+        let body = ''
+        proxyRes.on('data', (chunk) => { body += chunk })
+        proxyRes.on('end', () => {
+          console.log('[Hermes] 401 Response body:', body.substring(0, 500))
+        })
+      }
+      
       // 转发状态码
       res.status(proxyRes.statusCode)
 
@@ -234,6 +435,9 @@ function proxySSEStream(req, res, targetBaseUrl, path) {
 
 // ==================== 连接管理 ====================
 
+// 应用认证中间件到所有 Hermes API 路由
+router.use(authWrapper)
+
 // 获取当前连接配置
 router.get('/api/hermes/connect', (req, res) => {
   res.json({
@@ -247,12 +451,77 @@ router.get('/api/hermes/connect', (req, res) => {
 router.post('/api/hermes/connect', (req, res) => {
   const { webUrl, apiUrl, apiKey } = req.body || {}
 
-  if (webUrl) hermesConfig.webUrl = webUrl
-  if (apiUrl) hermesConfig.apiUrl = apiUrl
-  if (apiKey !== undefined) hermesConfig.apiKey = apiKey
+  if (webUrl) {
+    hermesConfig.webUrl = webUrl
+    updateEnvVar('HERMES_WEB_URL', webUrl)
+  }
+  if (apiUrl) {
+    hermesConfig.apiUrl = apiUrl
+    updateEnvVar('HERMES_API_URL', apiUrl)
+  }
+  if (apiKey !== undefined) {
+    hermesConfig.apiKey = apiKey
+    updateEnvVar('HERMES_API_KEY', apiKey)
+  }
 
   console.log(`[Hermes] Connection updated: web=${hermesConfig.webUrl}, api=${hermesConfig.apiUrl}`)
   res.json({ ok: true, webUrl: hermesConfig.webUrl, apiUrl: hermesConfig.apiUrl })
+})
+
+// 更新 API Key（专用接口，支持验证）
+router.post('/api/hermes/api-key', async (req, res) => {
+  const { apiKey, validate } = req.body || {}
+
+  if (apiKey === undefined) {
+    return res.status(400).json({ ok: false, error: 'apiKey is required' })
+  }
+
+  // 如果需要验证，先测试新 API Key 是否有效
+  if (validate && apiKey) {
+    try {
+      const testResult = await new Promise((resolve) => {
+        const url = new URL('/api/status', hermesConfig.webUrl || 'http://localhost:9119')
+        http.get({
+          hostname: url.hostname,
+          port: url.port,
+          path: url.pathname,
+          headers: { 'Authorization': `Bearer ${apiKey}` },
+          timeout: 5000,
+        }, (proxyRes) => {
+          let data = ''
+          proxyRes.on('data', (chunk) => { data += chunk })
+          proxyRes.on('end', () => {
+            resolve({ ok: proxyRes.statusCode === 200, status: proxyRes.statusCode })
+          })
+        }).on('error', (err) => {
+          resolve({ ok: false, error: err.message })
+        }).on('timeout', () => {
+          resolve({ ok: false, error: 'Timeout' })
+        })
+      })
+
+      if (!testResult.ok) {
+        return res.status(400).json({ 
+          ok: false, 
+          error: `API Key validation failed: ${testResult.error || `status ${testResult.status}`}` 
+        })
+      }
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: `Validation error: ${err.message}` })
+    }
+  }
+
+  // 更新内存中的 API Key
+  hermesConfig.apiKey = apiKey
+
+  // 写入 .env 文件
+  const writeSuccess = updateEnvVar('HERMES_API_KEY', apiKey)
+  if (!writeSuccess) {
+    console.warn('[Hermes] API Key updated in memory but failed to write to .env')
+  }
+
+  console.log('[Hermes] API Key updated')
+  res.json({ ok: true, message: 'API Key updated successfully' })
 })
 
 // 测试连接

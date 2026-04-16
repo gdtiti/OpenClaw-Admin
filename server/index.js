@@ -13,7 +13,7 @@ import checkDiskSpace from 'check-disk-space'
 import { execSync } from 'child_process'
 import pty from 'node-pty'
 import db, { createBackupRecord, updateBackupRecord, getBackupRecord, getBackupRecords, getBackupRecordsCount, deleteBackupRecord } from './database.js'
-import hermesProxyRouter, { initHermesConfig } from './hermes-proxy.js'
+import hermesProxyRouter, { initHermesConfig, setAuthMiddleware } from './hermes-proxy.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -35,6 +35,8 @@ function loadEnvConfig() {
       HERMES_WEB_URL: '',
       HERMES_API_URL: '',
       HERMES_API_KEY: '',
+      HERMES_CLI_PATH: '',
+      HERMES_HOME: '',
     }
   }
   const content = readFileSync(envPath, 'utf-8')
@@ -52,6 +54,8 @@ function loadEnvConfig() {
     HERMES_WEB_URL: parsed.HERMES_WEB_URL || '',
     HERMES_API_URL: parsed.HERMES_API_URL || '',
     HERMES_API_KEY: parsed.HERMES_API_KEY || '',
+    HERMES_CLI_PATH: parsed.HERMES_CLI_PATH || '',
+    HERMES_HOME: parsed.HERMES_HOME || '',
   }
 }
 
@@ -296,6 +300,9 @@ function authMiddleware(req, res, next) {
   }
   next()
 }
+
+// 设置 Hermes 代理的认证中间件
+setAuthMiddleware(authMiddleware)
 
 app.get('/api/auth/config', (req, res) => {
   res.json({
@@ -1380,9 +1387,118 @@ app.post('/api/terminal/heartbeat', authMiddleware, (req, res) => {
 
 // ============ Hermes CLI API ============
 
-const HERMES_CLI_PATH = '/data/user/work/hermes-agent/.venv/bin/hermes'
-const HERMES_HOME = '/data/user/work/hermes-agent'
-const HERMES_VENV_BIN = '/data/user/work/hermes-agent/.venv/bin'
+function findHermesCliPath() {
+  if (envConfig.HERMES_CLI_PATH && existsSync(envConfig.HERMES_CLI_PATH)) {
+    return envConfig.HERMES_CLI_PATH
+  }
+
+  const homeDir = os.homedir()
+  const possiblePaths = []
+
+  if (process.platform === 'win32') {
+    possiblePaths.push(
+      join(homeDir, 'hermes-agent', '.venv', 'Scripts', 'hermes.exe'),
+      join(homeDir, '.local', 'bin', 'hermes.exe'),
+      'C:\\hermes-agent\\.venv\\Scripts\\hermes.exe'
+    )
+  } else {
+    possiblePaths.push(
+      join(homeDir, '.local', 'bin', 'hermes'),
+      join(homeDir, 'hermes-agent', '.venv', 'bin', 'hermes'),
+      '/usr/local/bin/hermes',
+      '/usr/bin/hermes',
+      '/data/user/work/hermes-agent/.venv/bin/hermes'
+    )
+  }
+
+  for (const p of possiblePaths) {
+    if (existsSync(p)) {
+      try {
+        const stat = statSync(p)
+        if (stat.isFile() || stat.isSymbolicLink()) {
+          return p
+        }
+      } catch {}
+    }
+  }
+
+  try {
+    const whichCmd = process.platform === 'win32' ? 'where' : 'which'
+    const result = execSync(`${whichCmd} hermes`, { encoding: 'utf8', timeout: 5000 }).trim()
+    if (result && existsSync(result.split('\n')[0])) {
+      return result.split('\n')[0]
+    }
+  } catch {}
+
+  if (process.platform !== 'win32') {
+    const searchDirs = [
+      homeDir,
+      '/usr/local',
+      '/usr',
+      '/opt',
+      '/data'
+    ]
+    
+    for (const searchDir of searchDirs) {
+      if (!existsSync(searchDir)) continue
+      try {
+        const findCmd = `find "${searchDir}" -type f -name "hermes" 2>/dev/null | head -5`
+        const result = execSync(findCmd, { encoding: 'utf8', timeout: 30000 }).trim()
+        if (result) {
+          const lines = result.split('\n').filter(Boolean)
+          for (const line of lines) {
+            const path = line.trim()
+            if (path && existsSync(path)) {
+              try {
+                const stat = statSync(path)
+                if (stat.isFile() || stat.isSymbolicLink()) {
+                  console.log(`[HermesCLI] Found hermes at: ${path}`)
+                  return path
+                }
+              } catch {}
+            }
+          }
+        }
+      } catch {}
+    }
+  }
+
+  return null
+}
+
+function findHermesHome(hermesCliPath) {
+  if (envConfig.HERMES_HOME && existsSync(envConfig.HERMES_HOME)) {
+    return envConfig.HERMES_HOME
+  }
+
+  if (hermesCliPath) {
+    const venvBin = dirname(hermesCliPath)
+    const venvDir = dirname(venvBin)
+    const possibleHome = dirname(venvDir)
+    if (existsSync(possibleHome)) {
+      return possibleHome
+    }
+  }
+
+  const homeDir = os.homedir()
+  const possibleHomes = [
+    join(homeDir, 'hermes-agent'),
+    join(homeDir, '.hermes'),
+    '/data/user/work/hermes-agent'
+  ]
+
+  for (const h of possibleHomes) {
+    if (existsSync(h)) {
+      return h
+    }
+  }
+
+  return hermesCliPath ? dirname(dirname(dirname(hermesCliPath))) : null
+}
+
+const HERMES_CLI_PATH = findHermesCliPath()
+const HERMES_HOME = findHermesHome(HERMES_CLI_PATH)
+const HERMES_VENV_BIN = HERMES_CLI_PATH ? dirname(HERMES_CLI_PATH) : null
 
 // GET /api/hermes-cli/sessions — List all sessions
 app.get('/api/hermes-cli/sessions', authMiddleware, (req, res) => {
@@ -1498,6 +1614,11 @@ app.get('/api/hermes-cli/stream', authMiddleware, (req, res) => {
   }
 
   // --- Create new session ---
+  if (!HERMES_CLI_PATH) {
+    res.status(503).json({ error: 'Hermes CLI not found. Please install hermes-agent or configure HERMES_CLI_PATH in .env' })
+    return
+  }
+
   const sessionId = randomUUID()
   const now = Date.now()
   hermesCliSessionCounter++
@@ -3917,6 +4038,11 @@ server.listen(envConfig.PORT, () => {
   }
   if (!hasDist) {
     console.log(`Development mode: Frontend at ${envConfig.DEV_FRONTEND_URL}`)
+  }
+  console.log(`Hermes CLI: ${HERMES_CLI_PATH || 'NOT FOUND'}`)
+  console.log(`Hermes Home: ${HERMES_HOME || 'NOT FOUND'}`)
+  if (!HERMES_CLI_PATH) {
+    console.log('WARNING: Hermes CLI not found. Install hermes-agent or set HERMES_CLI_PATH in .env')
   }
 
   try {

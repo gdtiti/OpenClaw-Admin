@@ -433,6 +433,76 @@ const filteredMessages = computed(() => {
   return displayMessages.value.filter((m) => m.role === roleFilter.value)
 })
 
+// Hermes Agent 工具名称映射表
+const HERMES_TOOL_NAMES: Record<string, string> = {
+  // Web tools
+  web_search: 'Web 搜索',
+  web_extract: 'Web 提取',
+  
+  // Terminal & File tools
+  terminal: '终端',
+  process: '进程管理',
+  read_file: '读取文件',
+  write_file: '写入文件',
+  patch: '文件编辑',
+  search_files: '文件搜索',
+  
+  // Browser tools
+  browser_navigate: '浏览器导航',
+  browser_snapshot: '页面快照',
+  browser_vision: '页面截图',
+  browser_click: '点击元素',
+  browser_type: '输入文本',
+  browser_press: '按键',
+  browser_scroll: '滚动页面',
+  browser_back: '后退',
+  browser_get_images: '获取图片',
+  browser_console: '控制台',
+  
+  // Media tools
+  vision_analyze: '图像分析',
+  image_generate: '图像生成',
+  text_to_speech: '语音合成',
+  
+  // Agent orchestration
+  todo: '任务管理',
+  clarify: '澄清问题',
+  execute_code: '代码执行',
+  delegate_task: '任务委托',
+  
+  // Memory & recall
+  memory: '记忆管理',
+  session_search: '会话搜索',
+  
+  // Automation & delivery
+  cronjob: '定时任务',
+  send_message: '发送消息',
+  
+  // Skills
+  skill_manage: '技能管理',
+}
+
+// 获取工具的友好显示名称
+function getToolDisplayName(toolName: string): string {
+  if (!toolName) return '工具'
+  // 直接匹配
+  if (HERMES_TOOL_NAMES[toolName]) {
+    return HERMES_TOOL_NAMES[toolName]
+  }
+  // 检查是否是 MCP 工具 (格式: server_toolname)
+  if (toolName.includes('_')) {
+    const parts = toolName.split('_')
+    // 尝试匹配后半部分
+    const suffix = parts.slice(1).join('_')
+    if (HERMES_TOOL_NAMES[suffix]) {
+      return HERMES_TOOL_NAMES[suffix]
+    }
+    // 返回格式化的名称
+    return toolName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+  }
+  return toolName
+}
+
 const renderMessageEntries = computed<RenderMessage[]>(() => {
   const list = filteredMessages.value
   const rendered: RenderMessage[] = []
@@ -443,7 +513,8 @@ const renderMessageEntries = computed<RenderMessage[]>(() => {
 
     if (item.role === 'tool') {
       const parsedContent = parseToolMessage(item.content)
-      const toolName = item.toolName || parsedContent?.toolName || 'Tool'
+      const rawToolName = item.toolName || parsedContent?.toolName || 'Tool'
+      const toolName = getToolDisplayName(rawToolName)
       const isError = item.isError || parsedContent?.isError
       const outputContent = parsedContent?.output || item.content || ''
       
@@ -464,6 +535,58 @@ const renderMessageEntries = computed<RenderMessage[]>(() => {
         structured,
       })
       continue
+    }
+
+    // 处理助手消息：检查消息对象上的 tool_calls 字段
+    if (item.role === 'assistant') {
+      const rawMsg = item as unknown as Record<string, unknown>
+      const toolCalls = rawMsg.tool_calls as Array<{ 
+        id?: string
+        function?: { name?: string; arguments?: string | Record<string, unknown> }
+        name?: string
+        arguments?: string | Record<string, unknown>
+      }> | null
+      
+      // 先从 content 解析结构化消息
+      const contentStructured = parseStructuredMessage(item.content)
+      
+      // 如果消息对象有 tool_calls，合并到结构化视图中
+      if (toolCalls && toolCalls.length > 0) {
+        const toolCallViews: ToolCallItemView[] = toolCalls.map(tc => {
+          const args = tc.function?.arguments || tc.arguments
+          let argumentsJson: string | undefined
+          if (args) {
+            if (typeof args === 'string') {
+              argumentsJson = args
+            } else {
+              try {
+                argumentsJson = JSON.stringify(args, null, 2)
+              } catch {
+                argumentsJson = String(args)
+              }
+            }
+          }
+          return {
+            id: tc.id,
+            name: getToolDisplayName(tc.function?.name || tc.name || 'unknown'),
+            argumentsJson,
+          }
+        })
+        
+        // 合并 content 解析的结果和消息对象的 tool_calls
+        const merged: StructuredMessageView = {
+          toolCalls: [...toolCallViews, ...(contentStructured?.toolCalls || [])],
+          thinkings: contentStructured?.thinkings || [],
+          toolResults: contentStructured?.toolResults || [],
+          plainTexts: contentStructured?.plainTexts || [],
+        }
+        rendered.push({
+          key: item.id || `assistant-${idx}`,
+          item,
+          structured: merged,
+        })
+        continue
+      }
     }
 
     const structured = parseStructuredMessage(item.content)
@@ -1172,7 +1295,7 @@ function parseStructuredMessage(content: string): StructuredMessageView | null {
       }
       toolCalls.push({
         id: asString(row.id || row.tool_call_id || row.toolCallId || row.call_id) || undefined,
-        name: asString(row.name || row.tool || row.toolName || row.tool_name) || 'unknown',
+        name: getToolDisplayName(asString(row.name || row.tool || row.toolName || row.tool_name) || 'unknown'),
         command: args ? asString(args.command || args.cmd) || undefined : undefined,
         workdir: args ? asString(args.workdir || args.cwd || args.dir) || undefined : undefined,
         timeout: args ? asNumber(args.timeout) : undefined,
@@ -1211,7 +1334,7 @@ function parseStructuredMessage(content: string): StructuredMessageView | null {
       if (!contentText.trim()) continue
       toolResults.push({
         id: asString(row.id || row.tool_call_id || row.toolCallId || row.call_id) || undefined,
-        name: asString(row.name || row.tool || row.toolName || row.tool_name) || undefined,
+        name: getToolDisplayName(asString(row.name || row.tool || row.toolName || row.tool_name) || '工具结果'),
         status: asString(row.status || row.state || row.error) || undefined,
         content: contentText,
       })
@@ -1249,7 +1372,8 @@ function formatToolOutput(content: string): string {
 // Get tool name from message
 function getToolNameFromMessage(content: string): string {
   const parsed = parseToolMessage(content)
-  return parsed?.toolName || 'Tool'
+  const rawName = parsed?.toolName || 'Tool'
+  return getToolDisplayName(rawName)
 }
 
 // Check if tool message has metadata
